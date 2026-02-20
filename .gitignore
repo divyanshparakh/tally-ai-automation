@@ -1,0 +1,111 @@
+############################
+# Python
+############################
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+############################
+# Virtual Environments
+############################
+venv/
+.venv/
+env/
+ENV/
+.python-version
+
+############################
+# FastAPI / App Runtime
+############################
+.env
+.env.*
+!.env.example
+*.log
+logs/
+run/
+tmp/
+
+############################
+# IDE / Editor
+############################
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+############################
+# Tally Integration
+############################
+# XML exports, responses, backups
+tally_exports/
+tally_xml/
+tally_backups/
+*.xml
+*.tdl.log
+
+# ODBC / temp dumps
+odbc_logs/
+*.odbc
+
+############################
+# AI / ML Artifacts
+############################
+# Models & weights
+models/
+checkpoints/
+*.bin
+*.pt
+*.pth
+*.onnx
+*.gguf
+
+# Embeddings / Vector DB
+vector_store/
+chroma/
+qdrant/
+faiss_index/
+*.faiss
+
+############################
+# Notebooks & Experiments
+############################
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+############################
+# Cache & Temporary Files
+############################
+.cache/
+pytest_cache/
+.mypy_cache/
+ruff_cache/
+
+############################
+# Testing & Coverage
+############################
+.coverage
+htmlcov/
+coverage.xml
+
+############################
+# Docker
+############################
+docker-compose.override.yml
+*.env.docker
+
+############################
+# Build / Distribution
+############################
+build/
+dist/
+*.egg-info/
+
+############################
+# OS Specific
+############################
+Desktop.ini
