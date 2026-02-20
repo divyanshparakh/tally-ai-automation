@@ -1,5 +1,5 @@
-from tally_core.interface import TallyInterface
-from tally_agent.llm_wrapper import get_llm_client, get_legacy_compatible_client
+from app.tally_core.interface import TallyInterface
+from app.tally_agent.llm_wrapper import get_llm_client, get_legacy_compatible_client
 import os
 
 # Test Tally Interface
