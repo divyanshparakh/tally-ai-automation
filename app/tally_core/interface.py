@@ -1,7 +1,8 @@
 import logging
 import re
 import xml.etree.ElementTree as ET
-from typing import List, Optional
+from collections import defaultdict
+from typing import List, Optional, Dict
 from tally_integration import TallyClient, TallyConnectionError
 
 logger = logging.getLogger(__name__)
@@ -138,3 +139,67 @@ class TallyInterface:
         except Exception as e:
             logger.error("Error fetching party ledgers: %s", e)
             return []
+
+    def get_latest_voucher_numbers_with_types(self) -> List[str]:
+        """Retrieves a list of all vouchers with their types."""
+        if not self.client:
+            return []
+        
+        xml_payload = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <ENVELOPE>
+            <HEADER>
+                <VERSION>1</VERSION>
+                <TALLYREQUEST>Export</TALLYREQUEST>
+                <TYPE>Collection</TYPE>
+                <ID>LastVoucher</ID>
+            </HEADER>
+            <BODY>
+                <DESC>
+                <STATICVARIABLES>
+                    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+                </STATICVARIABLES>
+                <TDL>
+                    <TDLMESSAGE>
+                    <COLLECTION NAME="LastVoucher"
+                                ISMODIFY="No"
+                                ISFIXED="No"
+                                ISINITIALIZE="No"
+                                ISOPTION="No"
+                                ISINTERNAL="No">
+                        <TYPE>Voucher</TYPE>
+                        <SORT>Default : -$AlterID</SORT>
+                        <MAXCOUNT>1</MAXCOUNT>
+                        <FETCH>VoucherNumber</FETCH>
+                    </COLLECTION>
+                    </TDLMESSAGE>
+                </TDL>
+                </DESC>
+            </BODY>
+        </ENVELOPE>"""
+
+        try:
+            response = self.execute_xml_query(xml_payload)
+            root = ET.fromstring(response)
+
+            # Store tuples of (alter_id, voucher_number) per type for sorting
+            raw: Dict[str, List[tuple]] = defaultdict(list)
+
+            for voucher in root.findall('.//VOUCHER'):
+                if voucher.get('VCHTYPE'):
+                    vch_type   = voucher.findtext('VOUCHERTYPENAME', default='Unknown')
+                    vch_number = voucher.findtext('VOUCHERNUMBER',   default='N/A')
+                    alter_id   = int(voucher.findtext('ALTERID', default='0').strip() or 0)
+                    raw[vch_type].append((alter_id, vch_number))
+
+            # Pick only the highest AlterID entry per type
+            results: Dict[str, str] = {
+                vch_type: max(entries, key=lambda x: x[0])[1]
+                for vch_type, entries in raw.items()
+            }
+
+            return results
+
+        except Exception as e:
+            logger.error("Error fetching vouchers: %s", e)
+            return {}

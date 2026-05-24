@@ -113,11 +113,14 @@ class SalesVoucherState(TypedDict, total=False):
     item_confidence: str                  # "pending" | "confirmed" | "failed"
     item_retry_count: int
 
-    # ── Node 4: XML ────────────────────────────────────────
+    # ── Node 4: Voucher ────────────────────────────────────
+    voucher_number: Optional[str]
+
+    # ── Node 5: XML ────────────────────────────────────────
     xml_payload: Optional[str]
     xml_retry_count: int
 
-    # ── Node 5: Execution ──────────────────────────────────
+    # ── Node 6: Execution ──────────────────────────────────
     execution_result: Optional[dict]
     execution_error: Optional[str]
     error_retry_count: int
@@ -409,17 +412,88 @@ def node_resolve_items(state: SalesVoucherState, tally) -> SalesVoucherState:
 
 def route_items(
     state: SalesVoucherState,
-) -> Literal["node_prepare_xml", "node_resolve_items", "node_failed"]:
+) -> Literal["node_resolve_vouchernumber", "node_resolve_items", "node_failed"]:
     conf = state.get("item_confidence", "pending")
     if conf == "confirmed":
-        return "node_prepare_xml"
+        return "node_resolve_vouchernumber"
     if conf == "failed":
         return "node_failed"
     return "node_resolve_items"
 
+# ──────────────────────────────────────────────────────────
+# NODE 4 – VOUCHER NUMBER RESOLUTION
+# ──────────────────────────────────────────────────────────
+
+def node_resolve_vouchernumber(state: SalesVoucherState, tally) -> SalesVoucherState:
+    retry  = state.get("voucher_retry_count", 0)
+    latest = tally.get_latest_voucher_numbers_with_types()["Sales"]
+
+    system = (
+        "JSON Increment the trailing numeric portion of a Tally voucher number.\n\n"
+        "Rules:\n"
+        "1. Only increment the last numeric segment — leave everything else identical.\n"
+        "2. Preserve all prefixes, separators (/, -), and zero-padding exactly.\n"
+        "3. Return ONLY a JSON object — no markdown, no explanation, nothing else.\n\n"
+        "Output format:\n"
+        '{"next_voucher": "<incremented voucher number>"}\n\n'
+        "Examples:\n"
+        '  Input: "ARH/25-26/0654"  →  {"next_voucher": "ARH/25-26/0655"}\n'
+        '  Input: "SAL-0099"        →  {"next_voucher": "SAL-0100"}\n'
+        '  Input: "INV/001"         →  {"next_voucher": "INV/002"}\n'
+    )
+    human = f"Input: {latest}\nOUTPUT:"
+    voucher_number = None
+    is_valid       = False
+    
+    for attempt in range(3):
+        if attempt > 0:                          # feed error + bad output back on retry
+            human = (
+                f"Your previous output failed to parse with error: {parse_error}\n"
+                f"Check the format and it should be parsable: {raw}\n"
+                f"Retry for input: {latest}\nOUTPUT:"
+            )
+
+        try:
+            raw            = state["llm_client"].chat(system, human)
+            print(f"Attempt {attempt + 1}: Raw LLM output for voucher number: {raw}")
+            result         = json.loads(raw) if isinstance(raw, str) else raw
+            voucher_number = result.get("next_voucher", "").strip()
+            print(f"Attempt {attempt + 1}: Parsed voucher_number='{voucher_number}' from LLM output.")
+            is_valid       = bool(voucher_number)
+            if is_valid:
+                break                            # ✅ clean exit
+            parse_error = "next_voucher is empty"
+        except (ValueError, json.JSONDecodeError) as e:
+            parse_error    = f"{type(e).__name__}: {e}"
+            voucher_number, is_valid = "", False
+    # ─────────────────────────────────────────────────────────────────────────
+
+    if is_valid:
+        return {
+            **state,
+            "voucher_number":      voucher_number,
+            "voucher_confidence":  "confirmed",
+            "voucher_retry_count": retry + 1,
+        }
+
+    if retry >= MAX_RETRIES - 1:
+        return {
+            **state,
+            "voucher_number":      latest,           # fallback: never block pipeline
+            "voucher_confidence":  "confirmed",
+            "voucher_retry_count": retry + 1,
+        }
+
+    return {
+        **state,
+        "voucher_number":      None,
+        "voucher_confidence":  "pending",
+        "voucher_retry_count": retry + 1,
+    }
+
 
 # ──────────────────────────────────────────────────────────
-# NODE 4 – XML PREPARATION
+# NODE 5 – XML PREPARATION
 # ──────────────────────────────────────────────────────────
 
 def node_prepare_xml(state: SalesVoucherState) -> SalesVoucherState:
@@ -452,9 +526,10 @@ def node_prepare_xml(state: SalesVoucherState) -> SalesVoucherState:
         "Rules:\n"
         "1. DATE must be YYYYMMDD (no dashes).\n"
         "2. Add one <ALLINVENTORYENTRIES.LIST> block per item.\n"
-        "3. Party ledger AMOUNT is negative (Dr party / Cr sales).\n"
-        "4. Sales ledger AMOUNT equals total of all item amounts (positive).\n"
-        "5. STRICTLY OUTPUT ONLY: {\"xml\": \"<raw xml string>\"} — "
+        "3. Use the provided Voucher Number exactly as-is for <VOUCHERNUMBER>.\n"
+        "4. Party ledger AMOUNT is negative (Dr party / Cr sales).\n"
+        "5. Sales ledger AMOUNT equals total of all item amounts (positive).\n"
+        "6. STRICTLY OUTPUT ONLY: {\"xml\": \"<raw xml string>\"} — "
         "valid JSON, no markdown, no extra keys, no explanation."
         + error_hint
     )
@@ -462,6 +537,7 @@ def node_prepare_xml(state: SalesVoucherState) -> SalesVoucherState:
     human = (
         f"Customer (PARTY_NAME): {state.get('customer_name')}\n"
         f"Date (YYYYMMDD):        {state.get('date_str')}\n"
+        f"Voucher Number:         {state.get('voucher_number')}\n"
         f"Total amount:           {total}\n"
         f"Items:\n{json.dumps(items_for_xml, indent=2)}"
     )
@@ -524,7 +600,7 @@ def node_prepare_xml(state: SalesVoucherState) -> SalesVoucherState:
 
 
 # ──────────────────────────────────────────────────────────
-# NODE 5 – EXECUTE & ERROR RECOVERY
+# NODE 6 – EXECUTE & ERROR RECOVERY
 # ──────────────────────────────────────────────────────────
 
 def node_execute(state: SalesVoucherState, tally) -> SalesVoucherState:
@@ -627,6 +703,7 @@ def node_failed(state: SalesVoucherState) -> SalesVoucherState:
 def build_sales_voucher_graph(tally_interface):
     def _resolve_customer(s): return node_resolve_customer(s, tally_interface)
     def _resolve_items(s):    return node_resolve_items(s, tally_interface)
+    def _resolve_vouchernumber(s): return node_resolve_vouchernumber(s, tally_interface)
     def _execute(s):          return node_execute(s, tally_interface)
 
     builder = StateGraph(SalesVoucherState)
@@ -634,6 +711,7 @@ def build_sales_voucher_graph(tally_interface):
     builder.add_node("node_resolve_customer", _resolve_customer)
     builder.add_node("node_parse_date",       node_parse_date)
     builder.add_node("node_resolve_items",    _resolve_items)
+    builder.add_node("node_resolve_vouchernumber", _resolve_vouchernumber)
     builder.add_node("node_prepare_xml",      node_prepare_xml)
     builder.add_node("node_execute",          _execute)
     builder.add_node("node_failed",           node_failed)
@@ -650,10 +728,11 @@ def build_sales_voucher_graph(tally_interface):
         "node_parse_date":    "node_parse_date",
     })
     builder.add_conditional_edges("node_resolve_items", route_items, {
-        "node_prepare_xml":   "node_prepare_xml",
-        "node_resolve_items": "node_resolve_items",
-        "node_failed":        "node_failed",
+        "node_resolve_vouchernumber": "node_resolve_vouchernumber",
+        "node_resolve_items":         "node_resolve_items",
+        "node_failed":                "node_failed",
     })
+    builder.add_edge("node_resolve_vouchernumber", "node_prepare_xml")
     builder.add_edge("node_prepare_xml", "node_execute")
     builder.add_conditional_edges("node_execute", route_execution, {
         END:                     END,
@@ -692,6 +771,7 @@ class SalesVoucherAgent:
             "items":                None,
             "item_confidence":      "pending",
             "item_retry_count":     0,
+            "voucher_retry_count":     0,
             "xml_payload":          None,
             "xml_retry_count":      0,
             "execution_result":     None,
